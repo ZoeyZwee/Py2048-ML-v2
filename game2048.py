@@ -1,7 +1,14 @@
 import numpy as np
 import random
 from tkinter import *
+from enum import IntEnum
 
+
+class Direction(IntEnum):
+    LEFT = 0
+    RIGHT = 1
+    UP = 2
+    DOWN = 3
 
 class Game:
     """
@@ -9,52 +16,64 @@ class Game:
 
     The active board is stored in an NP matrix. Instead of storing tile values directly, only the exponent is stored
     """
+
     def __init__(self):
-        self.zerocount = 16  # number of zeroes on board. is used when determining where to place tile
-        self.score = 0  # each merge adds scoreText equal to the post-merge value
+        self.action_space = Direction
+        self.chance_codes = list(range(32))
         self.matrix = np.zeros((4, 4), dtype=int)
-        self.newTile(first=True)
+        # place first tile
+        sel = np.random.randint(4, size=2)
+        self.matrix[sel[0], sel[1]] = 1
+        self.matrix_rotations = None
+        self.update_rotations()
 
-    def get_board(self):
-        """
-        :return: current board as a flat vector
-        """
-        return self.matrix.flatten()
+    def update_rotations(self):
+        # used for swiping different directions
+        # must be called every time self.matrix is re-assigned
+        self.matrix_rotations = [self.matrix, np.fliplr(self.matrix), np.rot90(self.matrix, axes=(0, 1)), np.rot90(self.matrix, axes=(1, 0))]
 
-    def newTile(self, first=False):
+    def get_legal_moves(self):
+        is_legal = [True, True, True, True]
+        for direction in Direction:
+            old_matrix = self.matrix.copy()
+            is_legal[direction] = self.move(direction)
+            self.set_matrix(old_matrix)
+        return is_legal
+
+    def new_game(self):
+        self.matrix = np.zeros((4, 4), dtype=int)
+        sel = np.random.randint(4, size=2)
+        self.matrix[sel[0], sel[1]] = 1  # place first tile
+        self.update_rotations()
+
+    def set_matrix(self, matrix):
+        self.matrix = matrix.copy()
+        self.update_rotations()
+
+    def new_tile(self):
         """
         stick a new tile on the board. 9:1 odds of 2 vs 4 (2^1 or 2^2)
-        :param first: true if placing the first tile of the game (i.e. a new game). First tile is always a 2 (2^1)
         :return: none
         """
-        val = 1
-        if not first and random.random() > 0.9:  # 90% chance of 1, 10% chance of 2
-            val = 2
+        outcome = self.generate_chance_outcome()
+        self.apply_chance_outcome(outcome)
 
-        i = random.randint(0, self.zerocount - 1)  # pick the i'th zero
-        for tile in np.nditer(self.matrix, op_flags=['readwrite']):
-            if tile[...] == 0:  # found a zero!
-                if i > 0:  # don't place yet...
-                    i -= 1
-                else:  # it is time. place new tile
-                    tile[...] = val
-                    self.zerocount -= 1  # update zero count
-                    return
-    def isGameOver(self):
-        if self.zerocount > 0: # empty spaces -> swipes possible
+    def is_game_over(self):
+
+        if np.any(self.matrix == 0): # if board has open positions then game is still on
             return False
 
         pairs = [
-            ((0, 0), (1, 0)), ((1, 0), (2, 0)), ((2, 0), (3, 0)), # updown pairs, col 0
-            ((0, 1), (1, 1)), ((1, 1), (2, 1)), ((2, 1), (3, 1)), # updown pairs, col 1
-            ((0, 2), (1, 2)), ((1, 2), (2, 2)), ((2, 2), (3, 2)), # updown pairs, col 2
-            ((0, 3), (1, 3)), ((1, 3), (2, 3)), ((2, 3), (3, 3)), # updown pairs, col 3
-            ((0, 0), (0, 1)), ((1, 0), (1, 1)), ((2, 0), (2, 1)), ((3, 0), (3, 1)), # leftright pairs, col 0/1
-            ((0, 1), (0, 2)), ((1, 1), (1, 2)), ((2, 1), (2, 2)), ((3, 1), (3, 2)), # leftright pairs, col 1/2
+            ((0, 0), (1, 0)), ((1, 0), (2, 0)), ((2, 0), (3, 0)),  # updown pairs, col 0
+            ((0, 1), (1, 1)), ((1, 1), (2, 1)), ((2, 1), (3, 1)),  # updown pairs, col 1
+            ((0, 2), (1, 2)), ((1, 2), (2, 2)), ((2, 2), (3, 2)),  # updown pairs, col 2
+            ((0, 3), (1, 3)), ((1, 3), (2, 3)), ((2, 3), (3, 3)),  # updown pairs, col 3
+            ((0, 0), (0, 1)), ((1, 0), (1, 1)), ((2, 0), (2, 1)), ((3, 0), (3, 1)),  # leftright pairs, col 0/1
+            ((0, 1), (0, 2)), ((1, 1), (1, 2)), ((2, 1), (2, 2)), ((3, 1), (3, 2)),  # leftright pairs, col 1/2
             ((0, 2), (0, 3)), ((1, 2), (1, 3)), ((2, 2), (2, 3)), ((3, 2), (3, 3))  # leftright pairs, col 2/3
         ]
 
-        for p in pairs: # no empty spaces, but board has an adjacent pair -> swipes possible
+        for p in pairs:  # since board is full, any potential swipes are from adjacent pairs
             if self.matrix[p[0][0]][p[0][1]] == self.matrix[p[1][0]][p[1][1]]:
                 return False
 
@@ -63,83 +82,110 @@ class Game:
 
     def move(self, direction):
         """
-        flip the board around, swipe left, flip around again. gen new tile
-        :param direction: direction to be swiped. string. LEFT RIGHT UP DOWN
-        :return: True if valid move, False otherwise
+        play the move specified by direction, and add a tile if the move did something
+        :param direction: direction to swipe the board
+        :return: True/False if the move did something
         """
-        oldMatrix = self.matrix.copy()  # compare with matrix after move to determine if board has changed
+        old_matrix = self.matrix.copy()  # compare with matrix after move to determine if board has changed
+
+        reward = self.apply_action(direction)
+        is_legal = not np.all(np.equal(old_matrix, self.matrix))
+        if is_legal:
+            self.new_tile()
+
+        return is_legal
+
+    def generate_chance_outcome(self):
+        """
+        Select whether new tile is a 2 or 4, then select an empty position to place the tile.
+        Encode the selections as an integer x from 0-31, where (x<16) indicates (new tile==2),
+        and x % 16 gives the position of the tile.
+        :return: outcome
+        """
+
+        zero_indices = np.flatnonzero(self.matrix.flat == 0)
+
+        if zero_indices.size == 0:
+            # if board is full, it doesn't matter what chance code we generate.
+            # this happens if we reach a terminal state in mcts
+            return 0
+
+        if random.random() > 0.9:  # 90% chance of 1, 10% chance of 2
+            base = 16
+        else:
+            base = 0
+
+
+        offset = np.random.choice(zero_indices)
+
+        return base + offset
+
+    def apply_chance_outcome(self, outcome: int):
+        """
+        Add a tile to the board, as specified by the outcome code.
+            0-15 indicates a 2 was generated at position (outcome)
+            16-31 indicates a 4 was generated at position (outcome-16)
+        If the position is already occupied, do nothing.
+        :param outcome: integer from 0-31 indicating outcome
+        :return: None
+        """
+        if outcome < 16:
+            if self.matrix.flat[outcome] == 0:  # only fails during MCTS where illegal chance outcomes are possible
+                self.matrix.flat[outcome] = 1
+        else:
+            if self.matrix.flat[outcome-16] == 0:
+                self.matrix.flat[outcome - 16] = 2
+
+    def apply_action(self, direction):
+        """
+        flip the board around, swipe left, flip around again. does not generate a new tile
+        :param direction: direction to be swiped. string. LEFT RIGHT UP DOWN
+        :return: Gain in score resulting from the action
+        """
 
         def lSwipeRow(row):
             """
-            Take the input row and push all the tiles to the left. returns new row object. does NOT modify.
+            Take the input row and push all the tiles to the left. Modifies the row in place
 
-            Function creates an array (which we eventually return) and aims to fill the temp array from the left.
             We make use of the fact that the finalized output will be "full" from the left side. This perspective allows us
             to easily avoid accidentally merging the same tile twice (eg. [4,2,2,0] could mistakenly become [8,0,0,0])
 
             :param row: ndarray. tiles are pushed left
-            :return: updated row in ndarray form
             """
-            temp = [0, 0, 0, 0]
+            reward = 0
             preVal = -1  # value of merge candidate. -1 if no merge candidate
-            j = 0  # index of temp we are trying to fill
-            for i in range(0, 4):  # test each tile in row
+            j = 0  # current write index
+            for i in range(0, 4):  # i is current read index
                 val = row[i]
                 if val != 0:
-                    # merge if match and merge candidate exists
-                    if preVal == val and preVal != -1:
-                        temp[j - 1] = val + 1  # j-1 since we just updated the previous - didnt fill a new tile
+                    if preVal == val:  # if we have a match then merge
+                        row[j - 1] = val + 1  # j-1 is the last thing we wrote to (i.e. merge candidate)
                         preVal = -1
-                        self.zerocount += 1  # a merge means a new zero on the board
-                        self.score += 2 << (val)
-                    # else fill the "current" tile
-                    else:
+                        reward += val+1
+                    else:  # otherwise just copy the current cell over
                         preVal = val
-                        temp[j] = val
+                        row[j] = val
                         j += 1
-            return np.array(temp)
+            row[j:] = 0  # remainder of array is zeros
+
+            return reward
 
         def lswipe(matrix):
             """
-            swipe all rows left.
+            swipe all rows left. modifies in place
             :param: matrix: board to be swept
-            :return: updated matrix
             """
-            for i in range(0, 4):
-                matrix[i] = lSwipeRow(matrix[i])
-            return matrix
+            reward = 0
+            for row in matrix:
+                reward += lSwipeRow(row)
+            return reward
 
         # Move shit around
-        if direction == "LEFT" or direction == 0:
-            self.matrix = lswipe(self.matrix)
+        view = self.matrix_rotations[direction]
+        return lswipe(view)  # return reward
 
-        elif direction == "RIGHT" or direction == 1:
-            self.matrix = np.fliplr(self.matrix)
-            self.matrix = lswipe(self.matrix)
-            self.matrix = np.fliplr(self.matrix)
-
-        elif direction == "UP" or direction == 2:
-            self.matrix = np.rot90(self.matrix, axes=(0, 1))
-            self.matrix = lswipe(self.matrix)
-            self.matrix = np.rot90(self.matrix, axes=(1, 0))
-
-        elif direction == "DOWN" or direction == 3:
-            self.matrix = np.rot90(self.matrix, axes=(1, 0))
-            self.matrix = lswipe(self.matrix)
-            self.matrix = np.rot90(self.matrix, axes=(0, 1))
-
-        else:
-            print("INVALID SWIPE DIRECTION")
-
-        # check if move is legal. Only generate new tile on legal move.
-        if not np.all(np.equal(oldMatrix, self.matrix)):
-            # is legal :)
-            self.newTile()
-            return True
-        else:
-            # is not legal >:(
-            # print("INVALID MOVE")
-            return False
+    def __eq__(self, other):
+        return self.matrix == other.matrix
 
 
 class GameWindow:
@@ -189,51 +235,18 @@ class GameWindow:
         self.gridFrame = Frame(self.root)
         self.gridFrame.pack()
 
-        self.scoreText = IntVar()
-        self.scoreText.set(0)
-
     def paint(self, game):
         for child in self.gridFrame.winfo_children():
             child.grid_forget()
             child.destroy()
 
-        self.scoreText.set(game.score)
-        Label(self.gridFrame, textvariable=self.scoreText).grid(column=3, row=0)
-
         for i in range(4):
             for j in range(4):
                 Label(
                     self.gridFrame,
-                    text=1<<game.matrix[i][j],
+                    text=1 << game.matrix[i][j],
                     font=("", 30),
                     fg=self.fcolours[game.matrix[i][j]],
                     bg=self.bcolours[game.matrix[i][j]], width=6, height=3
                 ).grid(row=i + 1, column=j, padx=2, pady=2)
         self.root.update()
-
-
-if __name__ == "__main__":
-    # play game with keyboard input.
-    def keypress(event):
-        # key is variable to allow for AI control
-        key = event.keysym
-        print(key)
-        if key == "Right" or key == "d":
-            kb_game.move("RIGHT")
-        elif key == "Left" or key == "a":
-            kb_game.move("LEFT")
-        elif key == "Down" or key == "s":
-            kb_game.move("DOWN")
-        elif key == "Up" or key == "w":
-            kb_game.move("UP")
-
-        if kb_game.isGameOver() or key == "Escape":
-            print(f"Game Over! Final Score: {kb_game.score}")
-            exit()
-        UI.paint(kb_game)
-
-    UI = GameWindow()
-    kb_game = Game()
-    UI.root.bind("<Key>", keypress)
-    UI.paint(kb_game)
-    UI.root.mainloop()
